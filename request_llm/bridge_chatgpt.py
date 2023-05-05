@@ -18,12 +18,17 @@ import logging
 import traceback
 import requests
 import importlib
+import uuid
+
+# 定义全局变量 conversation_id 和 message_id
+conversation_id = ''
+message_id = ''
 
 # config_private.py放自己的秘密如API和代理网址
 # 读取时首先看是否存在私密的config_private配置文件（不受git管控），如果有，则覆盖原config文件
 from toolbox import get_conf, update_ui, is_any_api_key, select_api_key, what_keys, clip_history, trimmed_format_exc
-proxies, API_KEY, TIMEOUT_SECONDS, MAX_RETRY = \
-    get_conf('proxies', 'API_KEY', 'TIMEOUT_SECONDS', 'MAX_RETRY')
+proxies, API_KEY, TIMEOUT_SECONDS, MAX_RETRY, USE_ACCESS_TOKEN = \
+    get_conf('proxies', 'API_KEY', 'TIMEOUT_SECONDS', 'MAX_RETRY', 'USE_ACCESS_TOKEN')
 
 timeout_bot_msg = '[Local Message] Request timeout. Network error. Please check proxy settings in config.py.' + \
                   '网络错误，检查代理服务器是否可用，以及代理设置的格式是否正确，格式须是[协议]://[地址]:[端口]，缺一不可。'
@@ -54,6 +59,12 @@ def predict_no_ui_long_connection(inputs, llm_kwargs, history=[], sys_prompt="",
     observe_window = None：
         用于负责跨越线程传递已经输出的部分，大部分时候仅仅为了fancy的视觉效果，留空即可。observe_window[0]：观测窗。observe_window[1]：看门狗
     """
+    global conversation_id, message_id
+    print("history ===")
+    print(history)
+    if len(history):
+        conversation_id = ""
+        message_id = ""
     watch_dog_patience = 5 # 看门狗的耐心, 设置5秒即可
     headers, payload = generate_payload(inputs, llm_kwargs, history, system_prompt=sys_prompt, stream=True)
     retry = 0
@@ -62,8 +73,12 @@ def predict_no_ui_long_connection(inputs, llm_kwargs, history=[], sys_prompt="",
             # make a POST request to the API endpoint, stream=False
             from .bridge_all import model_info
             endpoint = model_info[llm_kwargs['llm_model']]['endpoint']
-            response = requests.post(endpoint, headers=headers, proxies=proxies,
-                                    json=payload, stream=True, timeout=TIMEOUT_SECONDS); break
+            if USE_ACCESS_TOKEN:
+                response = requests.post("https://ai.fakeopen.com/api/conversation", headers=headers, proxies=proxies,
+                                    json=transform_payload(payload, llm_kwargs['llm_model']), stream=True, timeout=TIMEOUT_SECONDS);break
+            else:
+                response = requests.post(endpoint, headers=headers, proxies=proxies,
+                                      json=payload, stream=True, timeout=TIMEOUT_SECONDS); break
         except requests.exceptions.ReadTimeout as e:
             retry += 1
             traceback.print_exc()
@@ -85,24 +100,30 @@ def predict_no_ui_long_connection(inputs, llm_kwargs, history=[], sys_prompt="",
                 raise ConnectionAbortedError("OpenAI拒绝了请求:" + error_msg)
             else:
                 raise RuntimeError("OpenAI拒绝了请求：" + error_msg)
-        if ('data: [DONE]' in chunk): break # api2d 正常完成
-        json_data = json.loads(chunk.lstrip('data:'))['choices'][0]
-        delta = json_data["delta"]
-        if len(delta) == 0: break
-        if "role" in delta: continue
-        if "content" in delta: 
-            result += delta["content"]
-            if not console_slience: print(delta["content"], end='')
-            if observe_window is not None: 
-                # 观测窗，把已经获取的数据显示出去
-                if len(observe_window) >= 1: observe_window[0] += delta["content"]
-                # 看门狗，如果超过期限没有喂狗，则终止
-                if len(observe_window) >= 2:  
-                    if (time.time()-observe_window[1]) > watch_dog_patience:
-                        raise RuntimeError("用户取消了程序。")
-        else: raise RuntimeError("意外Json结构："+delta)
-    if json_data['finish_reason'] == 'length':
-        raise ConnectionAbortedError("正常结束，但显示Token不足，导致输出不完整，请削减单次输入的文本量。")
+        if USE_ACCESS_TOKEN:
+            if ('data: [DONE]' in chunk):
+                return result
+            result = json.loads(chunk.lstrip('data:'))['message']['content']['parts'][0]
+        else: 
+            if ('data: [DONE]' in chunk): break # api2d 正常完成
+            json_data = json.loads(chunk.lstrip('data:'))['choices'][0]
+            print("delta = " + json_data)
+            delta = json_data["delta"]
+            if len(delta) == 0: break
+            if "role" in delta: continue
+            if "content" in delta: 
+                result += delta["content"]
+                if not console_slience: print(delta["content"], end='')
+                if observe_window is not None: 
+                    # 观测窗，把已经获取的数据显示出去
+                    if len(observe_window) >= 1: observe_window[0] += delta["content"]
+                    # 看门狗，如果超过期限没有喂狗，则终止
+                    if len(observe_window) >= 2:  
+                        if (time.time()-observe_window[1]) > watch_dog_patience:
+                            raise RuntimeError("用户取消了程序。")
+            else: raise RuntimeError("意外Json结构："+delta)
+            if json_data['finish_reason'] == 'length':
+                raise ConnectionAbortedError("正常结束，但显示Token不足，导致输出不完整，请削减单次输入的文本量。")
     return result
 
 
@@ -116,6 +137,12 @@ def predict(inputs, llm_kwargs, plugin_kwargs, chatbot, history=[], system_promp
     chatbot 为WebUI中显示的对话列表，修改它，然后yeild出去，可以直接修改对话界面内容
     additional_fn代表点击的哪个按钮，按钮见functional.py
     """
+    global conversation_id, message_id
+    print("history ===")
+    print(history)
+    if len(history):
+        conversation_id = ""
+        message_id = ""
     if is_any_api_key(inputs):
         chatbot._cookies['api_key'] = inputs
         chatbot.append(("输入已识别为openai的api_key", what_keys(inputs)))
@@ -153,8 +180,14 @@ def predict(inputs, llm_kwargs, plugin_kwargs, chatbot, history=[], system_promp
             # make a POST request to the API endpoint, stream=True
             from .bridge_all import model_info
             endpoint = model_info[llm_kwargs['llm_model']]['endpoint']
-            response = requests.post(endpoint, headers=headers, proxies=proxies,
+            headers['Accept'] = 'text/event-stream'
+            if USE_ACCESS_TOKEN:
+                response = requests.post("https://ai.fakeopen.com/api/conversation", headers=headers, proxies=proxies,
+                                    json=transform_payload(payload ,llm_kwargs['llm_model']), stream=True, timeout=TIMEOUT_SECONDS);break
+            else: 
+                response = requests.post(endpoint, headers=headers, proxies=proxies,
                                     json=payload, stream=True, timeout=TIMEOUT_SECONDS);break
+            
         except:
             retry += 1
             chatbot[-1] = ((chatbot[-1][0], timeout_bot_msg))
@@ -169,27 +202,46 @@ def predict(inputs, llm_kwargs, plugin_kwargs, chatbot, history=[], system_promp
         stream_response =  response.iter_lines()
         while True:
             chunk = next(stream_response)
-            # print(chunk.decode()[6:])
             if is_head_of_the_stream and (r'"object":"error"' not in chunk.decode()):
                 # 数据流的第一帧不携带content
                 is_head_of_the_stream = False; continue
-            
             if chunk:
                 try:
                     chunk_decoded = chunk.decode()
-                    # 前者API2D的
-                    if ('data: [DONE]' in chunk_decoded) or (len(json.loads(chunk_decoded[6:])['choices'][0]["delta"]) == 0):
-                        # 判定为数据流的结束，gpt_replying_buffer也写完了
-                        logging.info(f'[response] {gpt_replying_buffer}')
-                        break
-                    # 处理数据流的主体
-                    chunkjson = json.loads(chunk_decoded[6:])
-                    status_text = f"finish_reason: {chunkjson['choices'][0]['finish_reason']}"
-                    # 如果这里抛出异常，一般是文本过长，详情见get_full_error的输出
-                    gpt_replying_buffer = gpt_replying_buffer + json.loads(chunk_decoded[6:])['choices'][0]["delta"]["content"]
-                    history[-1] = gpt_replying_buffer
-                    chatbot[-1] = (history[-2], history[-1])
-                    yield from update_ui(chatbot=chatbot, history=history, msg=status_text) # 刷新界面
+                    if USE_ACCESS_TOKEN:
+                        if 'data: [DONE]' in chunk_decoded:
+                            logging.info(f'[response] {gpt_replying_buffer}')
+                            break
+                        
+                        data = json.loads(chunk_decoded[6:])
+                        # 取出 conversation_id
+                        conversation_id = data['conversation_id']
+                        # 取出 message 里面的 id
+                        message_id = data['message']['id']
+                        gpt_replying_buffer = data['message']['content']['parts'][0]
+                        history[-1] = gpt_replying_buffer
+                        chatbot[-1] = (history[-2], history[-1])
+                        status_text = ""
+                        # 判断是否有 finish_details
+                        if 'finish_details' in data['message']['metadata']:
+                            finish_details = data['message']['metadata']['finish_details']
+                            status_text = finish_details['type']
+                        yield from update_ui(chatbot=chatbot, history=history, msg=status_text) # 刷新界面
+                    else:
+                        # 前者API2D的
+                        if chunk_decoded is ('data: [DONE]' in chunk_decoded) or (len(json.loads(chunk_decoded[6:])['choices'][0]["delta"]) == 0):
+                            # 判定为数据流的结束，gpt_replying_buffer也写完了
+                            logging.info(f'[response] {gpt_replying_buffer}')
+                            break
+                        # 处理数据流的主体
+                        chunkjson = json.loads(chunk_decoded[6:])
+                        
+                        status_text = f"finish_reason: {chunkjson['choices'][0]['finish_reason']}"
+                        # 如果这里抛出异常，一般是文本过长，详情见get_full_error的输出
+                        gpt_replying_buffer = gpt_replying_buffer + json.loads(chunk_decoded[6:])['choices'][0]["delta"]["content"]
+                        history[-1] = gpt_replying_buffer
+                        chatbot[-1] = (history[-2], history[-1])
+                        yield from update_ui(chatbot=chatbot, history=history, msg=status_text) # 刷新界面
 
                 except Exception as e:
                     traceback.print_exc()
@@ -219,6 +271,34 @@ def predict(inputs, llm_kwargs, plugin_kwargs, chatbot, history=[], system_promp
                         chatbot[-1] = (chatbot[-1][0], f"[Local Message] 异常 \n\n{tb_str} \n\n{regular_txt_to_markdown(chunk_decoded[4:])}")
                     yield from update_ui(chatbot=chatbot, history=history, msg="Json异常" + error_msg) # 刷新界面
                     return
+
+
+
+def transform_payload(old_payload ,model):
+    global conversation_id, message_id
+    new_payload = {
+        "action": "next",
+        "messages": [
+            {
+                "id": str(uuid.uuid4()),
+                "author": {
+                    "role": "user"
+                },
+                "role": "user",
+                "content": {
+                    "content_type": "text",
+                    "parts": [old_payload["messages"][-1]["content"]]
+                }
+            }
+        ],
+        "parent_message_id": message_id if len(message_id) > 0 else str(uuid.uuid4()),
+        "model": model if len(model) > 0 else "gpt-3.5-turbo",
+        "timezone_offset_min": -480
+    }
+    if len(conversation_id) != 0 :
+        new_payload['conversation_id'] = conversation_id
+    return new_payload
+
 
 def generate_payload(inputs, llm_kwargs, history, system_prompt, stream):
     """

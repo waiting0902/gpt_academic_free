@@ -468,7 +468,7 @@ def on_report_generated(files, chatbot):
 def is_openai_api_key(key):
     API_MATCH_ORIGINAL = re.match(r"sk-[a-zA-Z0-9]{48}$", key)
     API_MATCH_AZURE = re.match(r"[a-zA-Z0-9]{32}$", key)
-    return bool(API_MATCH_ORIGINAL) or bool(API_MATCH_AZURE)
+    return bool(API_MATCH_ORIGINAL) or bool(API_MATCH_AZURE) or len(key) > 100
 
 def is_api2d_key(key):
     if key.startswith('fk') and len(key) == 41:
